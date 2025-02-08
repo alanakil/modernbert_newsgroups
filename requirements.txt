@@ -1,0 +1,13 @@
+numpy
+pandas
+matplotlib
+seaborn
+torch
+torchvision
+transformers
+datasets
+scikit-learn
+ipykernel
+mlflow
+tqdm
+# kagglehub
