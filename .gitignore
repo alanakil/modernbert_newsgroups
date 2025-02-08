@@ -2,3 +2,4 @@ src/__pycache__
 src/mlruns
 src/results
 artifacts/trained_model
+.DS_Store
