@@ -2,7 +2,6 @@
 # Write about this protject
 
 # %%
-import torch
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
@@ -27,185 +26,89 @@ from sklearn.metrics import (
 import numpy as np
 from sklearn.preprocessing import label_binarize
 import os
+
+import helpers
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # %%
-# 1. Device Setup: Use MPS if available (Apple Silicon), otherwise CUDA or CPU.
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-    print("Using MPS device")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-    print("Using CUDA device")
-else:
-    device = torch.device("cpu")
-    print("Using CPU device")
-
 # Set seed for reproducibility
-set_seed(42)
+set_seed(422)
+
+device = helpers.identify_device()
 
 # %%
-# 2. Model and Tokenizer Initialization
-model_name = "answerdotai/ModernBERT-base"  # Or "answerdotai/ModernBERT-large"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-# %%
-# 3. Load Datasets
-# 20 Newsgroups dataset (assumes the "SetFit/20_newsgroups" dataset is available)
+# Load Datasets
 newsgroups = load_dataset('SetFit/20_newsgroups')
-# MultiNLI dataset (this downloads the multi_nli dataset from Hugging Face)
-# multinli = load_dataset('multi_nli')
-
 
 # %%
-# 4. Tokenization with Dynamic Padding (no fixed padding here)
-def tokenize_newsgroups(example):
-    # Tokenize the 'text' field and apply truncation.
-    return tokenizer(example['text'], truncation=True)
-
-
-def tokenize_multinli(example):
-    # Tokenize both 'premise' and 'hypothesis' fields.
-    return tokenizer(example['premise'], example['hypothesis'], truncation=True)
-
-
-# Define a function to compute the token length for each example
-def compute_length(example):
-    # Tokenize the 'text' field without truncation
-    tokens = tokenizer.tokenize(example['text'])
-    # Store the token count in a new field 'length'
-    example['length'] = len(tokens)
-    return example
-
-
-# Use parallel processing (num_proc=4) to speed up tokenization if you have multiple cores.
-newsgroups_encoded = newsgroups.map(tokenize_newsgroups, batched=True)
-# multinli_encoded = multinli.map(tokenize_multinli, batched=True, num_proc=8)
-
-
-newsgroups = newsgroups.map(compute_length)
-
-# Extract the 'length' field from the dataset
-lengths = newsgroups["train"]['length']
-
-
-# Plot the distribution of token lengths
-plt.figure(figsize=(10, 6))
-plt.hist(lengths, bins=50, color='skyblue', edgecolor='black', alpha=0.7)
-plt.xlabel("Token Count")
-plt.ylabel("Frequency")
-plt.title("Distribution of Training Example Lengths (Token Count) in 20 Newsgroups")
-plt.show()
-
+num_labels = len(set(newsgroups["train"]["label"]))
+print(f"There are {num_labels} classes of documents")
 
 # %%
-# Define a function to tokenize and trim examples to a maximum length (e.g., 256 tokens)
-def tokenize_and_trim(example):
-    # Tokenize the 'text' field with truncation enabled and a specified max_length.
-    # The returned dictionary will include fields like 'input_ids' and 'attention_mask'.
-    return tokenizer(example['text'], truncation=True, max_length=200)
+# Print out the labels
+print(f"Labels: {set(newsgroups["train"]["label_text"])}")
 
+# %%
+# Load the model and tokenizer
+save_directory = "../artifacts/trained_model"
+model = AutoModelForSequenceClassification.from_pretrained(save_directory)
+tokenizer = AutoTokenizer.from_pretrained(save_directory)
+# %%
+# Tokenization with Dynamic Padding (no fixed padding here)
+newsgroups_encoded = newsgroups.map(
+    lambda x: helpers.tokenize_newsgroups(x, tokenizer),
+    batched=True
+)
+newsgroups = newsgroups.map(
+    lambda x: helpers.compute_length(x, tokenizer)
+)
 
+# %%
 # Apply the tokenize_and_trim function to both splits (train and test)
-newsgroups_trimmed = newsgroups.map(tokenize_and_trim, batched=True)
+max_length = 100
+newsgroups_trimmed = newsgroups.map(
+    lambda x: helpers.tokenize_and_trim(x, tokenizer, max_length=max_length),
+    batched=True
+)
+
+train_dataset = newsgroups_trimmed['train']
+eval_dataset = newsgroups_trimmed['test']
 
 # %%
-# 5. Label Encoding and Dataset Formatting
-# For the 20 Newsgroups dataset, ensure the target column is correctly encoded.
-newsgroups_encoded = newsgroups_encoded.class_encode_column('label')
-newsgroups_encoded.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
-
-# For MultiNLI, encode the 'label' column (assuming it is named "label").
-# multinli_encoded = multinli_encoded.class_encode_column('label')
-# multinli_encoded.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+# Training Arguments
+num_epochs = 5
+batch_size = 128
+lr = 1e-5
+weight_decay = 0.01
+training_args = TrainingArguments(
+    output_dir='./results',
+    evaluation_strategy='epoch',
+    learning_rate=lr,
+    per_device_train_batch_size=batch_size,
+    per_device_eval_batch_size=batch_size,
+    num_train_epochs=num_epochs,
+    weight_decay=weight_decay,
+)
 
 # %%
 # 6. Data Collator for Dynamic Padding
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 # %%
-# 7. Training Arguments
-training_args = TrainingArguments(
-    output_dir='./results',
-    evaluation_strategy='epoch',
-    learning_rate=1e-5,
-    per_device_train_batch_size=256,
-    per_device_eval_batch_size=256,
-    num_train_epochs=3,
-    weight_decay=0.01,
-)
-
-# %%
-# 8a. Fine-tuning on the 20 Newsgroups Dataset
+# Fine-tuning on the 20 Newsgroups Dataset
 # Create a model with 20 output labels.
-model_newsgroups = AutoModelForSequenceClassification.from_pretrained(
-    model_name, 
-    num_labels=20
-)
-# Optionally, move the model to the selected device.
-model_newsgroups.gradient_checkpointing_enable()
-model_newsgroups.to(device)
+model.gradient_checkpointing_enable()
+model.to(device)
 
-trainer_newsgroups = Trainer(
-    model=model_newsgroups,
-    args=training_args,
-    train_dataset=newsgroups_trimmed['train'],
-    eval_dataset=newsgroups_trimmed['test'],
-    data_collator=data_collator,
-    tokenizer=tokenizer,
-)
-
-print("Starting training on the 20 Newsgroups dataset...")
-trainer_newsgroups.train()
-print("Finished training on the 20 Newsgroups dataset.\n")
-
-# %%
-# Save the Trained Model Locally
-save_directory = "../artifacts/trained_model"
-trainer_newsgroups.save_model(save_directory)
-# Save the tokenizer as well so that it can be easily reloaded later.
-tokenizer.save_pretrained(save_directory)
-print(f"Trained model and tokenizer saved to '{save_directory}'.")
-
-
-
-
-# %%
-# Load eval
-newsgroups = load_dataset('SetFit/20_newsgroups')
-eval_dataset = newsgroups["test"]
-
-# Tokenize the evaluation dataset
-eval_dataset = eval_dataset.map(tokenize_and_trim, batched=True)
-# If needed, encode the label column (if it wasn't already done during training)
-eval_dataset = eval_dataset.class_encode_column("label")
-# Format the dataset to return PyTorch tensors
-eval_dataset.set_format("torch", columns=["input_ids", "attention_mask", "label"])
-
-
-# %%
-# Load the Trained Model Locally
-# Specify the directory where the model was saved
-save_directory = "../artifacts/trained_model"
-
-# Load the model and tokenizer
-model = AutoModelForSequenceClassification.from_pretrained(save_directory)
-tokenizer = AutoTokenizer.from_pretrained(save_directory)
-# Create dummy TrainingArguments (only the evaluation batch size is used here)
-training_args = TrainingArguments(
-    output_dir="./results",
-    per_device_eval_batch_size=8,  # adjust batch size as needed
-)
-
-# Create the Trainer using the loaded model
 trainer = Trainer(
     model=model,
     args=training_args,
-    tokenizer=tokenizer,
+    train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     data_collator=data_collator,
+    tokenizer=tokenizer,
 )
-
 
 # %%
 # -------------------------------
@@ -225,7 +128,8 @@ accuracy = accuracy_score(true_labels, predicted_labels)
 precision = precision_score(true_labels, predicted_labels, average='macro')
 recall = recall_score(true_labels, predicted_labels, average='macro')
 f1 = f1_score(true_labels, predicted_labels, average='macro')
-conf_mat = confusion_matrix(true_labels, predicted_labels)
+conf_mat = confusion_matrix(true_labels, predicted_labels).squeeze()
+conf_mat = np.round(100*conf_mat / np.sum(conf_mat, axis=1).reshape(20, 1), 0)
 
 # For multiclass AUC-ROC, we need predicted probabilities.
 probs = softmax(logits, axis=1)
@@ -252,7 +156,8 @@ else:
 
 # Plot the confusion matrix as a heatmap
 plt.figure(figsize=(10, 8))
-sns.heatmap(conf_mat, annot=True, fmt="d", cmap="Blues", cbar=True)
+# sns.heatmap(conf_mat, annot=True, fmt="d", cmap="Blues", cbar=True)
+sns.heatmap(conf_mat, annot=True, cmap="Blues", cbar=True)
 
 plt.xlabel("Predicted Labels", fontsize=12)
 plt.ylabel("True Labels", fontsize=12)
@@ -260,16 +165,139 @@ plt.title("Confusion Matrix", fontsize=14)
 plt.show()
 
 # %%
-# Number of classes (assumes classes are 0-indexed)
+# Convert logits to probabilities using softmax
+probs = softmax(logits, axis=1)
 n_classes = probs.shape[1]
 
+# Binarize the true labels for a one-vs-rest approach.
+# This creates a binary matrix of shape (n_samples, n_classes)
+true_labels_bin = label_binarize(true_labels, classes=np.arange(n_classes))
+
+# Compute micro-average ROC curve and AUC.
+# Flatten the arrays to treat the problem as one binary classification.
+fpr, tpr, _ = roc_curve(true_labels_bin.ravel(), probs.ravel())
+roc_auc = auc(fpr, tpr)
+
+# Plot the overall ROC curve
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, color='darkorange', lw=2,
+         label=f'Overall ROC curve (AUC = {roc_auc:.2f})')
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Overall ROC Curve (Micro-Average)')
+plt.legend(loc="lower right")
+plt.grid(True)
+plt.show()
+
+print(f"Overall AUC-ROC: {roc_auc:.4f}")
+
+
+# %%
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score, roc_curve, auc
+from sklearn.calibration import calibration_curve
+
+# --- 1. Calibration ---
+# Compute calibration curve: this will give you the fraction of positives
+# for each bin of predicted probability.
+plt.figure(figsize=(12, 10))
+
+# Loop through each class and plot its calibration curve.
+for i in range(n_classes):
+    # Binarize the true labels for class i:
+    true_binary = (true_labels == i).astype(int)
+    # Get predicted probabilities for class i:
+    prob_pred = probs[:, i]
+    
+    # Compute the calibration curve.
+    fraction_of_positives, mean_predicted_value = calibration_curve(true_binary, prob_pred, n_bins=10)
+    
+    plt.plot(mean_predicted_value, fraction_of_positives, marker='o', linewidth=2, label=f'Class {i}')
+
+# Plot the perfect calibration line.
+plt.plot([0, 1], [0, 1], "k--", label="Perfectly calibrated")
+plt.xlabel("Mean predicted probability", fontsize=14)
+plt.ylabel("Fraction of positives", fontsize=14)
+plt.title("Calibration Curves for Each Class (One-vs-Rest)", fontsize=16)
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# %%
+# --- 2. Threshold Tuning ---
+# Here we choose a range of thresholds and compute the F1 score for each.
+thresholds = np.linspace(0, 1, 101)
+f1_scores = []
+
+
+best_thresholds = {}
+
+# Iterate over each class
+for target_class in range(n_classes):
+    y_true_bin = (true_labels == target_class).astype(int)
+    probs_for_class = probs[:, target_class]
+    
+    thresholds = np.linspace(0, 1, 101)
+    f1_scores = []
+    
+    for threshold in thresholds:
+        y_pred_bin = (probs_for_class >= threshold).astype(int)
+        f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
+        f1_scores.append(f1)
+    
+    f1_scores = np.array(f1_scores)
+    best_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_idx]
+    best_thresholds[target_class] = (best_threshold, f1_scores[best_idx])
+    
+    # Optionally, plot for each class
+    plt.figure(figsize=(8, 6))
+    plt.plot(thresholds, f1_scores, marker="o")
+    plt.xlabel("Threshold")
+    plt.ylabel("F1 Score")
+    plt.title(f"Threshold Tuning for Class {target_class}")
+    plt.axvline(x=best_threshold, color='r', linestyle='--', 
+                label=f"Best threshold: {best_threshold:.2f}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+print("Best thresholds per class:")
+for cls, (thr, f1_val) in best_thresholds.items():
+    print(f"  Class {cls}: Threshold = {thr:.2f}, F1 Score = {f1_val:.4f}")
+
+f1_scores = np.array(f1_scores)
+best_idx = np.argmax(f1_scores)
+best_threshold = thresholds[best_idx]
+best_f1 = f1_scores[best_idx]
+
+# Plot F1 scores versus thresholds.
+plt.figure(figsize=(8, 6))
+plt.plot(thresholds, f1_scores, marker="o")
+plt.xlabel("Threshold")
+plt.ylabel("F1 Score")
+plt.title("Threshold Tuning (F1 Score)")
+plt.grid(True)
+plt.axvline(x=best_threshold, color='r', linestyle='--', label=f"Best threshold: {best_threshold:.2f}")
+plt.legend()
+plt.show()
+
+print(f"Best threshold: {best_threshold:.2f} with F1 score: {best_f1:.4f}")
+
+
+# %%
 # Convert true labels to a one-hot encoded format.
-true_labels_binarized = label_binarize(true_labels, classes=list(range(n_classes)))
+true_labels_binarized = label_binarize(true_labels, classes=list(range(num_labels)))
 
 plt.figure(figsize=(12, 10))
 
 # Plot ROC curve for each class.
-for i in range(n_classes):
+for i in range(num_labels):
     # Compute fpr, tpr for the i-th class.
     fpr, tpr, _ = roc_curve(true_labels_binarized[:, i], probs[:, i])
     roc_auc = auc(fpr, tpr)
@@ -287,5 +315,62 @@ plt.legend(loc="lower right", fontsize=10)
 plt.grid(True)
 plt.show()
 
+
+# %%
+# Determine the unique classes
+classes = np.unique(true_labels)
+
+# Dictionary to store metrics for each class.
+metrics_dict = {}
+
+for cls in classes:
+    # Create binary arrays for the current class:
+    # 1 if the instance belongs to the class, 0 otherwise.
+    y_true_bin = (true_labels == cls).astype(int)
+    y_pred_bin = (predicted_labels == cls).astype(int)
+    
+    # Compute metrics
+    acc = accuracy_score(y_true_bin, y_pred_bin)
+    prec = precision_score(y_true_bin, y_pred_bin, zero_division=0)
+    rec = recall_score(y_true_bin, y_pred_bin, zero_division=0)
+    f1 = f1_score(y_true_bin, y_pred_bin, zero_division=0)
+    
+    # Compute the confusion matrix for this class (binary: class vs. rest)
+    cm = confusion_matrix(y_true_bin, y_pred_bin)
+    
+    # Compute AUC-ROC.
+    # Note: AUC-ROC is best computed on continuous scores, so using binary predictions
+    # might result in a degenerate ROC curve. We'll attempt to compute it,
+    # but if only one class is present, roc_auc_score will raise an error.
+    try:
+        auc_val = roc_auc_score(y_true_bin, y_pred_bin)
+    except ValueError as e:
+        auc_val = None
+        print(f"Could not compute AUC-ROC for class {cls}: {e}")
+    
+    # Store the metrics in a dictionary for the current class.
+    metrics_dict[cls] = {
+        'accuracy': acc,
+        'precision': prec,
+        'recall': rec,
+        'f1_score': f1,
+        'auc_roc': auc_val,
+        'confusion_matrix': cm
+    }
+
+# Print the computed metrics for each class.
+for cls, metrics in metrics_dict.items():
+    print(f"Metrics for class {cls}:")
+    print(f"  Accuracy       : {metrics['accuracy']:.4f}")
+    print(f"  Precision      : {metrics['precision']:.4f}")
+    print(f"  Recall         : {metrics['recall']:.4f}")
+    print(f"  F1 Score       : {metrics['f1_score']:.4f}")
+    if metrics['auc_roc'] is not None:
+        print(f"  AUC-ROC        : {metrics['auc_roc']:.4f}")
+    else:
+        print("  AUC-ROC        : Not computable (possibly only one class present)")
+    print("  Confusion Matrix:")
+    print(metrics['confusion_matrix'])
+    print("-" * 40)
 
 # %%
