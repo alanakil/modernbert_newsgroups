@@ -2,11 +2,10 @@
 # Write about this protject
 
 # %%
-import torch
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
-    AutoModelForSequenceClassification,  # Using AutoModelForSequenceClassification as our model class.
+    AutoModelForSequenceClassification,
     Trainer,
     TrainingArguments,
     DataCollatorWithPadding,
@@ -14,58 +13,48 @@ from transformers import (
 )
 import matplotlib.pyplot as plt
 
-# %%
-# 1. Device Setup: Use MPS if available (Apple Silicon), otherwise CUDA or CPU.
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-    print("Using MPS device")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-    print("Using CUDA device")
-else:
-    device = torch.device("cpu")
-    print("Using CPU device")
+import helpers
 
+# %%
 # Set seed for reproducibility
 set_seed(422)
 
+device = helpers.identify_device()
+
 # %%
-# 2. Model and Tokenizer Initialization
+# Model and Tokenizer Initialization
 model_name = "answerdotai/ModernBERT-base"  # Or "answerdotai/ModernBERT-large"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 # %%
-# 3. Load Datasets
-# 20 Newsgroups dataset (assumes the "SetFit/20_newsgroups" dataset is available)
+# Load Datasets
 newsgroups = load_dataset('SetFit/20_newsgroups')
+
+# %%
+num_labels = len(set(newsgroups["train"]["label"]))
+print(f"There are {num_labels} classes of documents")
+
+# %%
+# Print out the labels
+print(f"Labels: {set(newsgroups["train"]["label_text"])}")
+
+# %%
+# For each label, print one example document
 
 
 # %%
-# 4. Tokenization with Dynamic Padding (no fixed padding here)
-def tokenize_newsgroups(example):
-    # Tokenize the 'text' field and apply truncation.
-    return tokenizer(example['text'], truncation=True)
+# Tokenization with Dynamic Padding (no fixed padding here)
+newsgroups_encoded = newsgroups.map(
+    lambda x: helpers.tokenize_newsgroups(x, tokenizer),
+    batched=True
+)
+newsgroups = newsgroups.map(
+    lambda x: helpers.compute_length(x, tokenizer)
+)
 
-
-# Define a function to compute the token length for each example
-def compute_length(example):
-    # Tokenize the 'text' field without truncation
-    tokens = tokenizer.tokenize(example['text'])
-    # Store the token count in a new field 'length'
-    example['length'] = len(tokens)
-    return example
-
-
-# Use parallel processing (num_proc=4) to speed up tokenization if you have multiple cores.
-newsgroups_encoded = newsgroups.map(tokenize_newsgroups, batched=True)
-# multinli_encoded = multinli.map(tokenize_multinli, batched=True, num_proc=8)
-
-
-newsgroups = newsgroups.map(compute_length)
-
+# %%
 # Extract the 'length' field from the dataset
 lengths = newsgroups["train"]['length']
-
 
 # Plot the distribution of token lengths
 plt.figure(figsize=(10, 6))
@@ -77,18 +66,17 @@ plt.show()
 
 
 # %%
-# Define a function to tokenize and trim examples to a maximum length (e.g., 256 tokens)
-def tokenize_and_trim(example):
-    # Tokenize the 'text' field with truncation enabled and a specified max_length.
-    # The returned dictionary will include fields like 'input_ids' and 'attention_mask'.
-    return tokenizer(example['text'], truncation=True, max_length=200)
-
-
 # Apply the tokenize_and_trim function to both splits (train and test)
-newsgroups_trimmed = newsgroups.map(tokenize_and_trim, batched=True)
+max_length = 50
+newsgroups_trimmed = newsgroups.map(
+    lambda x: helpers.tokenize_and_trim(x, tokenizer, max_length=max_length),
+    batched=True
+)
+
+train_dataset = newsgroups_trimmed['train']
+eval_dataset = newsgroups_trimmed['test']
 
 # %%
-# 5. Label Encoding and Dataset Formatting
 # For the 20 Newsgroups dataset, ensure the target column is correctly encoded.
 newsgroups_encoded = newsgroups_encoded.class_encode_column('label')
 newsgroups_encoded.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
@@ -98,46 +86,83 @@ newsgroups_encoded.set_format(type='torch', columns=['input_ids', 'attention_mas
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 # %%
-# 7. Training Arguments
+# Training Arguments
+num_epochs = 10
+batch_size = 256
+lr = 1e-5
+weight_decay = 0.01
 training_args = TrainingArguments(
     output_dir='./results',
     evaluation_strategy='epoch',
-    learning_rate=1e-5,
-    per_device_train_batch_size=256,
-    per_device_eval_batch_size=256,
-    num_train_epochs=3,
-    weight_decay=0.01,
+    logging_strategy='epoch', 
+    learning_rate=lr,
+    per_device_train_batch_size=batch_size,
+    per_device_eval_batch_size=batch_size,
+    num_train_epochs=num_epochs,
+    weight_decay=weight_decay,
 )
 
 # %%
-# 8. Fine-tuning on the 20 Newsgroups Dataset
+# Fine-tuning on the 20 Newsgroups Dataset
 # Create a model with 20 output labels.
 model_newsgroups = AutoModelForSequenceClassification.from_pretrained(
-    model_name, 
-    num_labels=20
+    model_name,
+    num_labels=num_labels
 )
-# Optionally, move the model to the selected device.
 model_newsgroups.gradient_checkpointing_enable()
 model_newsgroups.to(device)
 
 trainer_newsgroups = Trainer(
     model=model_newsgroups,
     args=training_args,
-    train_dataset=newsgroups_trimmed['train'],
-    eval_dataset=newsgroups_trimmed['test'],
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
     data_collator=data_collator,
     tokenizer=tokenizer,
 )
 
+# %%
 print("Starting training on the 20 Newsgroups dataset...")
 trainer_newsgroups.train()
 print("Finished training on the 20 Newsgroups dataset.\n")
 
 # %%
-# Save the Trained Model Locally
+# Access the log history (a list of dictionaries)
+log_history = trainer_newsgroups.state.log_history
+
+# Initialize lists to store metrics per epoch
+epochs = []
+train_losses = []
+eval_losses = []
+
+# Iterate over the log history and extract entries that have an "epoch" key.
+for log in log_history:
+    if "epoch" in log:
+        epochs.append(log["epoch"])
+        # Some log entries may have only one type of loss.
+        train_losses.append(log.get("loss", None))
+        eval_losses.append(log.get("eval_loss", None))
+
+# Remove any None values (in case some epochs didn't log one of the losses)
+# Here, we assume that each epoch should have both values.
+epochs = [e for e, t, v in zip(epochs, train_losses, eval_losses) if t is not None and v is not None]
+train_losses = [t for t in train_losses if t is not None]
+eval_losses = [v for v in eval_losses if v is not None]
+
+plt.figure(figsize=(10, 6))
+plt.plot(epochs, train_losses, label="Train Loss", marker="o")
+plt.plot(epochs, eval_losses, label="Eval Loss", marker="o")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.title("Training and Evaluation Loss per Epoch")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# %%
+# Save the model and tokenizer
 save_directory = "../artifacts/trained_model"
 trainer_newsgroups.save_model(save_directory)
-# Save the tokenizer as well so that it can be easily reloaded later.
 tokenizer.save_pretrained(save_directory)
 print(f"Trained model and tokenizer saved to '{save_directory}'.")
 
