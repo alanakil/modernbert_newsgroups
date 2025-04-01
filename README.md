@@ -1,6 +1,6 @@
 # ModernBERT 
 
-In January 2025, I gave a presentation on ModernBERT at the AI Journal Club in PMI.
+In January 2025, I gave a presentation on ModernBERT at the AI Journal Club that I host.
 I reviewed the technical details including how it was pre-trained, its importance in the industry, and I contrasted it with its ancestor, BERT.
 
 In this repo, I finetuned ModernBERT-base on the NewsGroups dataset, which contains news articles classified into one of 20 classes.
