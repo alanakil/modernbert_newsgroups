@@ -27,6 +27,8 @@ import numpy as np
 from sklearn.preprocessing import label_binarize
 import os
 
+from sklearn.calibration import calibration_curve
+
 import helpers
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -34,7 +36,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # %%
 # Set seed for reproducibility
 set_seed(422)
-
 device = helpers.identify_device()
 
 # %%
@@ -96,7 +97,6 @@ training_args = TrainingArguments(
 data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
 # %%
-# Fine-tuning on the 20 Newsgroups Dataset
 # Create a model with 20 output labels.
 model.gradient_checkpointing_enable()
 model.to(device)
@@ -196,18 +196,13 @@ print(f"Overall AUC-ROC: {roc_auc:.4f}")
 
 
 # %%
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.metrics import f1_score, roc_curve, auc
-from sklearn.calibration import calibration_curve
-
 # --- 1. Calibration ---
 # Compute calibration curve: this will give you the fraction of positives
 # for each bin of predicted probability.
 plt.figure(figsize=(12, 10))
 
 # Loop through each class and plot its calibration curve.
-for i in range(n_classes):
+for i in range(num_labels):
     # Binarize the true labels for class i:
     true_binary = (true_labels == i).astype(int)
     # Get predicted probabilities for class i:
@@ -238,7 +233,7 @@ f1_scores = []
 best_thresholds = {}
 
 # Iterate over each class
-for target_class in range(n_classes):
+for target_class in range(num_labels):
     y_true_bin = (true_labels == target_class).astype(int)
     probs_for_class = probs[:, target_class]
     
