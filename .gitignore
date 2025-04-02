@@ -1,5 +1,5 @@
 src/__pycache__
 src/mlruns
-src/results
-artifacts/trained_model
+src/results*
+artifacts/
 .DS_Store
