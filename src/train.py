@@ -23,7 +23,8 @@ device = helpers.identify_device()
 
 # %%
 # Model and Tokenizer Initialization
-model_name = "answerdotai/ModernBERT-base"  # Or "answerdotai/ModernBERT-large"
+# model_name = "answerdotai/ModernBERT-base"
+model_name = "google-bert/bert-base-cased"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 # %%
@@ -37,10 +38,6 @@ print(f"There are {num_labels} classes of documents")
 # %%
 # Print out the labels
 print(f"Labels: {set(newsgroups["train"]["label_text"])}")
-
-# %%
-# For each label, print one example document
-
 
 # %%
 # Tokenization with Dynamic Padding (no fixed padding here)
@@ -92,7 +89,7 @@ batch_size = 256
 lr = 1e-5
 weight_decay = 0.01
 training_args = TrainingArguments(
-    output_dir='./results',
+    output_dir=f'./results_{model_name}',
     evaluation_strategy='epoch',
     logging_strategy='epoch', 
     learning_rate=lr,
@@ -161,7 +158,7 @@ plt.show()
 
 # %%
 # Save the model and tokenizer
-save_directory = "../artifacts/trained_model"
+save_directory = "../artifacts/trained_bert"
 trainer_newsgroups.save_model(save_directory)
 tokenizer.save_pretrained(save_directory)
 print(f"Trained model and tokenizer saved to '{save_directory}'.")
